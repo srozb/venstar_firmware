@@ -19,9 +19,9 @@ ENTRY_PORT = 9002
 
 # Expected file structure from an unpacked firmware
 # Use universal_unpack.py to get these.
-CLIENT_CERT = "skyport_public.pem"
-CLIENT_KEY = "skyport_private.pem"
-CA_CERT = "skyport_root.pem"
+CLIENT_CERT = "certs/skyport_public.pem"
+CLIENT_KEY = "certs/skyport_private.pem"
+CA_CERT = "certs/skyport_root.pem"
 
 # Command IDs
 CMD_PING = 1
@@ -76,7 +76,7 @@ def is_ascii(b):
     return all(32 <= c <= 126 for c in b)
 
 class SkyportClient:
-    def __init__(self, host, port, mac, guid, fw_ver, model):
+    def __init__(self, host, port, mac, guid, fw_ver, model, state_name="DISCONNECTED"):
         self.host = host
         self.port = port
         self.mac = mac
@@ -84,6 +84,7 @@ class SkyportClient:
         self.full_id = f"{mac}:{guid}"
         self.fw_ver = fw_ver
         self.model = model
+        self.state_name = state_name
         
         self.ssock = None
         self.running = False
@@ -129,7 +130,7 @@ class SkyportClient:
         self.send_packet({"command": CMD_FIRMWARECHECK})
 
     def run(self):
-        log(f"Connecting to {self.host}:{self.port}...", "CONN")
+        log(f"Connecting to {self.host}:{self.port} (State: {self.state_name})...", "CONN")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.load_cert_chain(certfile=CLIENT_CERT, keyfile=CLIENT_KEY)
         context.check_hostname = False
@@ -140,18 +141,20 @@ class SkyportClient:
             self.ssock = context.wrap_socket(raw_sock, server_hostname=self.host)
             log("SSL Handshake Successful", "SSL")
             
-            # Handle Gateway Redirect
-            header = read_exact(self.ssock, 4)
-            if header and is_ascii(header):
-                rest = self.ssock.recv(1024)
-                full = (header + rest).decode('utf-8', errors='ignore').strip()
-                if ":" in full and "{" not in full:
-                    new_host, new_port = full.split(":")
-                    log(f"Redirect -> {new_host}:{new_port}", "INFO")
-                    self.ssock.close()
-                    new_client = SkyportClient(new_host, int(new_port), self.mac, self.guid, self.fw_ver, self.model)
-                    new_client.run()
-                    return
+            if self.state_name == "DISCONNECTED":
+                # Entry host: Expect redirect string
+                self.ssock.settimeout(10.0)
+                data = self.ssock.recv(1024)
+                if data and is_ascii(data):
+                    full = data.decode('utf-8', errors='ignore').strip()
+                    if ":" in full and "{" not in full:
+                        new_host, new_port = full.split(":")
+                        log(f"Redirect -> {new_host}:{new_port}", "INFO")
+                        self.ssock.close()
+                        new_client = SkyportClient(new_host, int(new_port), self.mac, self.guid, self.fw_ver, self.model, state_name="LOGIN")
+                        new_client.run()
+                        return
+                log("Failed to receive redirect, attempting login anyway...", "WARN")
 
             # Perform Login
             self.send_packet({
